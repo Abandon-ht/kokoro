@@ -15,6 +15,25 @@ VOCODER_STATE_LEN = STATIC_PITCH_LEN
 HAR_CHANNELS = 22
 HAR_FRAMES = 23761
 WAVEFORM_LEN = 118800
+RESIDUAL_SCALE = 2 ** -0.5
+
+
+def forward_adain_res_block_for_export(block, x: torch.FloatTensor, timbre: torch.FloatTensor) -> torch.FloatTensor:
+    residual = block.norm1(x, timbre)
+    residual = block.actv(residual)
+    if block.upsample_type == 'none':
+        residual = block.pool(residual)
+    else:
+        residual = F.interpolate(residual, scale_factor=2, mode='nearest')
+    residual = block.conv1(block.dropout(residual))
+    residual = block.norm2(residual, timbre)
+    residual = block.actv(residual)
+    residual = block.conv2(block.dropout(residual))
+
+    shortcut = block.upsample(x)
+    if block.learned_sc:
+        shortcut = block.conv1x1(shortcut)
+    return (residual + shortcut) * RESIDUAL_SCALE
 
 
 class KDecoderFrontForExport(torch.nn.Module):
@@ -38,7 +57,7 @@ class KDecoderFrontForExport(torch.nn.Module):
         for block in self.decoder.decode:
             if res:
                 x = torch.cat([x, asr_res, f0, noise], axis=1)
-            x = block(x, timbre)
+            x = forward_adain_res_block_for_export(block, x, timbre)
             if block.upsample_type != 'none':
                 res = False
         return x
