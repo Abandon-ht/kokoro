@@ -10,7 +10,33 @@ from kokoro import KModel, KPipeline
 
 ASR_FRAME_LEN = 198
 F0_FRAME_LEN = ASR_FRAME_LEN * 2
-WAVEFORM_LEN = F0_FRAME_LEN * 300
+
+
+class KDecoderFrontForExport(torch.nn.Module):
+    def __init__(self, kmodel: KModel):
+        super().__init__()
+        self.decoder = kmodel.decoder
+
+    def forward(
+        self,
+        asr: torch.FloatTensor,
+        f0_pred: torch.FloatTensor,
+        n_pred: torch.FloatTensor,
+        timbre: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        f0 = self.decoder.F0_conv(f0_pred.unsqueeze(1))
+        noise = self.decoder.N_conv(n_pred.unsqueeze(1))
+        x = torch.cat([asr, f0, noise], axis=1)
+        x = self.decoder.encode(x, timbre)
+        asr_res = self.decoder.asr_res(asr)
+        res = True
+        for block in self.decoder.decode:
+            if res:
+                x = torch.cat([x, asr_res, f0, noise], axis=1)
+            x = block(x, timbre)
+            if block.upsample_type != 'none':
+                res = False
+        return x
 
 
 def resize_last_dim(tensor: torch.Tensor, target_len: int) -> torch.Tensor:
@@ -46,23 +72,24 @@ def load_input_ids(pipeline: KPipeline, text: str) -> tuple[str, torch.LongTenso
     return phonemes, input_ids
 
 
-def load_ref_s(pipeline: KPipeline, voice: str, phoneme_length: int) -> torch.FloatTensor:
+def load_timbre(pipeline: KPipeline, voice: str, phoneme_length: int) -> tuple[torch.FloatTensor, torch.FloatTensor]:
     pack = pipeline.load_voice(voice).to(pipeline.model.device)
     ref_s = pack[phoneme_length - 1]
     if ref_s.ndim == 1:
         ref_s = ref_s.unsqueeze(0)
-    return ref_s
+    return ref_s, ref_s[:, :128]
 
 
 def collect_decoder_tensors(
     model: KModel,
     pipeline: KPipeline,
+    decoder_front: KDecoderFrontForExport,
     text: str,
     voice: str,
     speed: float,
 ) -> dict[str, torch.Tensor]:
     phonemes, input_ids = load_input_ids(pipeline, text)
-    ref_s = load_ref_s(pipeline, voice, len(phonemes))
+    ref_s, timbre = load_timbre(pipeline, voice, len(phonemes))
 
     with torch.no_grad():
         d_en, input_lengths, text_mask = model._encode_linguistic_tokens(input_ids)
@@ -74,16 +101,14 @@ def collect_decoder_tensors(
         asr_static = resize_last_dim(asr, ASR_FRAME_LEN)
         f0_static = resize_last_dim(f0_pred, F0_FRAME_LEN)
         n_static = resize_last_dim(n_pred, F0_FRAME_LEN)
-        ref_s_static = ref_s
-        waveform = model.decoder(asr_static, f0_static, n_static, ref_s_static[:, :128]).squeeze()
-        waveform_static = resize_last_dim(waveform.unsqueeze(0), WAVEFORM_LEN).squeeze(0)
+        decoder_state = decoder_front(asr_static, f0_static, n_static, timbre)
 
     return {
         'asr': asr_static.detach().cpu(),
         'F0_pred': f0_static.detach().cpu(),
         'N_pred': n_static.detach().cpu(),
-        'ref_s': ref_s_static.detach().cpu(),
-        'waveform': waveform_static.detach().cpu(),
+        'timbre': timbre.detach().cpu(),
+        'decoder_state': decoder_state.detach().cpu(),
     }
 
 
@@ -110,7 +135,7 @@ def load_texts(text_file: Path, sample_count: int) -> list[str]:
 
 
 def main():
-    parser = argparse.ArgumentParser('Export fixed-shape decoder calibration NPY files', add_help=True)
+    parser = argparse.ArgumentParser('Export fixed-shape decoder_front calibration NPY files', add_help=True)
     parser.add_argument('--config_file', '-c', type=str, default='checkpoints/config.json', help='path to model config file')
     parser.add_argument('--checkpoint_path', '-p', type=str, default='checkpoints/kokoro-v1_0.pth', help='path to model checkpoint')
     parser.add_argument('--lang_code', '-l', type=str, default='a', help='pipeline language code')
@@ -129,16 +154,17 @@ def main():
     model = KModel(config=args.config_file, model=args.checkpoint_path, disable_complex=True).to(args.device).eval()
     model.bert.config._attn_implementation = 'eager'
     pipeline = KPipeline(lang_code=args.lang_code, model=model, device=args.device)
+    decoder_front = KDecoderFrontForExport(model).eval()
 
     print(f'export root: {export_root}')
     print(f'samples    : {len(texts)}')
     print(f'voice      : {args.voice}')
-    print(f'shapes     : asr=(1,512,{ASR_FRAME_LEN}), F0_pred=(1,{F0_FRAME_LEN}), N_pred=(1,{F0_FRAME_LEN}), ref_s=(1,256), waveform=({WAVEFORM_LEN},)')
+    print(f'shapes     : asr=(1,512,{ASR_FRAME_LEN}), F0_pred=(1,{F0_FRAME_LEN}), N_pred=(1,{F0_FRAME_LEN}), timbre=(1,128), decoder_state=(1,512,{F0_FRAME_LEN})')
 
     for index, text in enumerate(texts):
-        tensors = collect_decoder_tensors(model, pipeline, text, args.voice, args.speed)
+        tensors = collect_decoder_tensors(model, pipeline, decoder_front, text, args.voice, args.speed)
         save_tensors(export_root, index, tensors)
-        print(f'[{index + 1}/{len(texts)}] saved calibration tensors for: {text[:80]}')
+        print(f'[{index + 1}/{len(texts)}] saved decoder_front calibration tensors for: {text[:80]}')
 
 
 if __name__ == '__main__':
