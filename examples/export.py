@@ -31,6 +31,7 @@ def export_onnx(model, output):
             "speed": {0: "batch_size"}
         }, 
         do_constant_folding = True, 
+        dynamo = False,
     )
 
     print('export kokoro.onnx ok!')
@@ -139,6 +140,7 @@ if __name__ == "__main__":
     os.makedirs(output_dir, exist_ok=True)
 
     kmodel = KModel(config=config_file, model=checkpoint_path, disable_complex=True)
+    kmodel.bert.config._attn_implementation = 'eager'
     model = KModelForONNX(kmodel).eval()
 
     if args.inference:

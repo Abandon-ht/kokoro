@@ -178,6 +178,25 @@ class DurationEncoder(nn.Module):
 
 # https://github.com/yl4579/StyleTTS2/blob/main/Utils/PLBERT/util.py
 class CustomAlbert(AlbertModel):
-    def forward(self, *args, **kwargs):
-        outputs = super().forward(*args, **kwargs)
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        token_type_ids=None,
+        position_ids=None,
+        inputs_embeds=None,
+        **kwargs,
+    ):
+        embedding_output = self.embeddings(
+            input_ids,
+            position_ids=position_ids,
+            token_type_ids=token_type_ids,
+            inputs_embeds=inputs_embeds,
+        )
+        outputs = self.encoder(
+            embedding_output,
+            attention_mask=None,
+            position_ids=position_ids,
+            **kwargs,
+        )
         return outputs.last_hidden_state
