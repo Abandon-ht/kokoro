@@ -268,9 +268,10 @@ class Generator(nn.Module):
         self.noise_res = nn.ModuleList()
         self.ups = nn.ModuleList()
         for i, (u, k) in enumerate(zip(upsample_rates, upsample_kernel_sizes)):
+            output_padding = 1 if i == len(upsample_rates) - 1 else 0
             self.ups.append(weight_norm(
                 nn.ConvTranspose1d(upsample_initial_channel//(2**i), upsample_initial_channel//(2**(i+1)),
-                                   k, u, padding=(k-u)//2)))
+                                   k, u, padding=(k-u)//2, output_padding=output_padding)))
         self.resblocks = nn.ModuleList()
         for i in range(len(self.ups)):
             ch = upsample_initial_channel//(2**(i+1))
@@ -289,7 +290,6 @@ class Generator(nn.Module):
         self.conv_post = weight_norm(nn.Conv1d(ch, self.post_n_fft + 2, 7, 1, padding=3))
         self.ups.apply(init_weights)
         self.conv_post.apply(init_weights)
-        self.reflection_pad = nn.ReflectionPad1d((1, 0))
         self.stft = (
             CustomSTFT(filter_length=gen_istft_n_fft, hop_length=gen_istft_hop_size, win_length=gen_istft_n_fft)
             if disable_complex
@@ -308,8 +308,6 @@ class Generator(nn.Module):
             x_source = self.noise_convs[i](har)
             x_source = self.noise_res[i](x_source, s)
             x = self.ups[i](x)
-            if i == self.num_upsamples - 1:
-                x = self.reflection_pad(x)
             x = x + x_source
             xs = None
             for j in range(self.num_kernels):
@@ -337,6 +335,31 @@ class UpSample1d(nn.Module):
             return F.interpolate(x, scale_factor=2, mode='nearest')
 
 
+class EquivalentUpsampleConv1d(nn.Conv1d):
+    def __init__(self, channels: int):
+        super().__init__(
+            channels,
+            channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            groups=channels,
+        )
+
+    def forward(self, x):
+        zeros = torch.zeros_like(x)
+        interleaved = torch.stack((x, zeros), dim=-1).flatten(-2, -1)
+        return F.conv1d(
+            interleaved,
+            torch.flip(self.weight, dims=[-1]),
+            self.bias,
+            stride=1,
+            padding=1,
+            dilation=1,
+            groups=self.groups,
+        )
+
+
 class AdainResBlk1d(nn.Module):
     def __init__(self, dim_in, dim_out, style_dim=64, actv=nn.LeakyReLU(0.2), upsample='none', dropout_p=0.0):
         super().__init__()
@@ -349,7 +372,7 @@ class AdainResBlk1d(nn.Module):
         if upsample == 'none':
             self.pool = nn.Identity()
         else:
-            self.pool = weight_norm(nn.ConvTranspose1d(dim_in, dim_in, kernel_size=3, stride=2, groups=dim_in, padding=1, output_padding=1))
+            self.pool = weight_norm(EquivalentUpsampleConv1d(dim_in))
 
     def _build_weights(self, dim_in, dim_out, style_dim):
         self.conv1 = weight_norm(nn.Conv1d(dim_in, dim_out, 3, 1, 1))

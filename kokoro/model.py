@@ -228,6 +228,44 @@ class KF0NPredictorForONNX(torch.nn.Module):
         return self.kmodel.predictor.F0Ntrain(en, ref_s[:, 128:])
 
 
+class KF0NSharedForONNX(torch.nn.Module):
+    def __init__(self, kmodel: KModel):
+        super().__init__()
+        self.kmodel = kmodel
+
+    def forward(
+        self,
+        en: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        shared, _ = self.kmodel.predictor.shared(en.transpose(-1, -2))
+        return shared.transpose(-1, -2)
+
+
+class KF0NHeadForONNX(torch.nn.Module):
+    def __init__(self, kmodel: KModel):
+        super().__init__()
+        self.kmodel = kmodel
+
+    def forward(
+        self,
+        shared: torch.FloatTensor,
+        ref_s: torch.FloatTensor,
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+        style = ref_s[:, 128:]
+
+        f0 = shared
+        for block in self.kmodel.predictor.F0:
+            f0 = block(f0, style)
+        f0 = self.kmodel.predictor.F0_proj(f0)
+
+        noise = shared
+        for block in self.kmodel.predictor.N:
+            noise = block(noise, style)
+        noise = self.kmodel.predictor.N_proj(noise)
+
+        return f0.squeeze(1), noise.squeeze(1)
+
+
 class KTextEncoderForONNX(torch.nn.Module):
     def __init__(self, kmodel: KModel):
         super().__init__()

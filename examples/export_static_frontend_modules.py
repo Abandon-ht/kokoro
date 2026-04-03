@@ -5,7 +5,17 @@ import onnx
 import torch
 
 from kokoro import KModel
-from kokoro.model import KEncoderForONNX, KF0NPredictorForONNX, KTextEncoderForONNX
+from kokoro.model import KEncoderForONNX, KF0NHeadForONNX, KF0NSharedForONNX, KTextEncoderForONNX
+
+
+class KEncoderFeaturesForONNX(torch.nn.Module):
+    def __init__(self, kmodel: KModel):
+        super().__init__()
+        self.encoder = KEncoderForONNX(kmodel)
+
+    def forward(self, input_ids: torch.LongTensor) -> torch.FloatTensor:
+        d_en, _, _ = self.encoder(input_ids)
+        return d_en
 
 
 DEFAULT_TOKEN_BUCKETS = '128,256,512'
@@ -95,7 +105,7 @@ def build_en(feature_dim: int, frame_bucket: int) -> torch.FloatTensor:
 
 
 def export_encoder_buckets(kmodel: KModel, output_dir: str, token_buckets: list[int]):
-    model = KEncoderForONNX(kmodel).eval()
+    model = KEncoderFeaturesForONNX(kmodel).eval()
     for token_bucket in token_buckets:
         input_ids = build_input_ids(kmodel, token_bucket)
         output_path = os.path.join(output_dir, f'encoder_token_{token_bucket}.onnx')
@@ -104,7 +114,7 @@ def export_encoder_buckets(kmodel: KModel, output_dir: str, token_buckets: list[
             output_path,
             args=(input_ids,),
             input_names=['input_ids'],
-            output_names=['d_en', 'input_lengths', 'text_mask'],
+            output_names=['d_en'],
         )
 
 
@@ -124,17 +134,30 @@ def export_text_encoder_buckets(kmodel: KModel, output_dir: str, text_encoder_bu
 
 
 def export_f0n_buckets(kmodel: KModel, output_dir: str, frame_buckets: list[int]):
-    model = KF0NPredictorForONNX(kmodel).eval()
+    shared_model = KF0NSharedForONNX(kmodel).eval()
+    head_model = KF0NHeadForONNX(kmodel).eval()
     feature_dim = kmodel.predictor.shared.input_size
     ref_s = build_ref_s(kmodel.predictor.text_encoder.sty_dim)
     for frame_bucket in frame_buckets:
         en = build_en(feature_dim, frame_bucket)
-        output_path = os.path.join(output_dir, f'f0n_predictor_frame_{frame_bucket}.onnx')
+        with torch.no_grad():
+            shared = shared_model(en)
+
+        shared_output_path = os.path.join(output_dir, f'f0n_shared_frame_{frame_bucket}.onnx')
         export_module(
-            model,
-            output_path,
-            args=(en, ref_s),
-            input_names=['en', 'ref_s'],
+            shared_model,
+            shared_output_path,
+            args=(en,),
+            input_names=['en'],
+            output_names=['shared'],
+        )
+
+        head_output_path = os.path.join(output_dir, f'f0n_head_frame_{frame_bucket}.onnx')
+        export_module(
+            head_model,
+            head_output_path,
+            args=(shared, ref_s),
+            input_names=['shared', 'ref_s'],
             output_names=['F0_pred', 'N_pred'],
         )
 

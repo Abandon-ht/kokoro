@@ -80,8 +80,6 @@ class KVocoderForExport(torch.nn.Module):
             x_source = self.generator.noise_convs[index](har)
             x_source = self.generator.noise_res[index](x_source, timbre)
             x = self.generator.ups[index](x)
-            if index == self.generator.num_upsamples - 1:
-                x = self.generator.reflection_pad(x)
             x = x + x_source
             xs = None
             for kernel_index in range(self.generator.num_kernels):
