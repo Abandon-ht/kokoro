@@ -23,10 +23,7 @@ RESIDUAL_SCALE = 2 ** -0.5
 def forward_adain_res_block_for_export(block, x: torch.FloatTensor, timbre: torch.FloatTensor) -> torch.FloatTensor:
     residual = block.norm1(x, timbre)
     residual = block.actv(residual)
-    if block.upsample_type == 'none':
-        residual = block.pool(residual)
-    else:
-        residual = F.interpolate(residual, scale_factor=2, mode='nearest')
+    residual = block.pool(residual)
     residual = block.conv1(block.dropout(residual))
     residual = block.norm2(residual, timbre)
     residual = block.actv(residual)

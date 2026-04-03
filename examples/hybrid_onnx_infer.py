@@ -9,14 +9,13 @@ import torch
 from kokoro import KModel, KPipeline
 
 
-TOKEN_BUCKET = 128
 FRAME_BUCKET = 198
 PITCH_BUCKET = FRAME_BUCKET * 2
 SAMPLE_RATE = 24000
 SAMPLES_PER_FRAME = 600
 
 
-def load_phonemes_and_input_ids(pipeline: KPipeline, text: str) -> tuple[str, torch.LongTensor]:
+def load_phonemes_and_input_ids(pipeline: KPipeline, text: str) -> tuple[str, np.ndarray]:
     if pipeline.lang_code in 'ab':
         _, tokens = pipeline.g2p(text)
         phonemes = ''
@@ -40,43 +39,16 @@ def load_phonemes_and_input_ids(pipeline: KPipeline, text: str) -> tuple[str, to
             input_id_list.append(token_id)
     input_id_list.append(0)
 
-    input_ids = torch.tensor([input_id_list], dtype=torch.long)
+    input_ids = np.asarray([input_id_list], dtype=np.int64)
     return phonemes, input_ids
 
 
-def load_reference_style(pipeline: KPipeline, voice: str, phoneme_length: int) -> torch.FloatTensor:
+def load_reference_style(pipeline: KPipeline, voice: str, phoneme_length: int) -> np.ndarray:
     pack = pipeline.load_voice(voice).cpu()
     ref_s = pack[phoneme_length - 1]
     if ref_s.ndim == 1:
         ref_s = ref_s.unsqueeze(0)
-    return ref_s
-
-
-def right_pad_last_dim(array: np.ndarray, target_length: int) -> np.ndarray:
-    if array.shape[-1] > target_length:
-        raise ValueError(f'Cannot pad array with length {array.shape[-1]} to shorter target {target_length}.')
-    if array.shape[-1] == target_length:
-        return array
-
-    padded = np.zeros((*array.shape[:-1], target_length), dtype=array.dtype)
-    padded[..., :array.shape[-1]] = array
-    return padded
-
-
-def right_pad_alignment(alignment: np.ndarray, token_bucket: int, frame_bucket: int) -> np.ndarray:
-    if alignment.shape[1] > token_bucket or alignment.shape[2] > frame_bucket:
-        raise ValueError(
-            f'Alignment shape {alignment.shape} exceeds static bucket {(token_bucket, frame_bucket)}.'
-        )
-
-    padded = np.zeros((alignment.shape[0], token_bucket, frame_bucket), dtype=alignment.dtype)
-    padded[:, :alignment.shape[1], :alignment.shape[2]] = alignment
-    return padded
-
-
-def build_padded_text_mask(token_length: int, token_bucket: int) -> np.ndarray:
-    positions = np.arange(token_bucket, dtype=np.int64)[None, :]
-    return positions >= token_length
+    return ref_s.numpy().astype(np.float32)
 
 
 def create_session(model_path: Path, providers: list[str]) -> ort.InferenceSession:
@@ -94,7 +66,7 @@ def build_har(generator, f0_pred: np.ndarray) -> np.ndarray:
     return har.cpu().contiguous().numpy().astype(np.float32)
 
 
-def synthesize_with_static_frontend(
+def synthesize_with_dynamic_frontend_static_backend(
     text: str,
     voice: str,
     lang_code: str,
@@ -119,93 +91,67 @@ def synthesize_with_static_frontend(
     phonemes, input_ids = load_phonemes_and_input_ids(pipeline, text)
     ref_s = load_reference_style(pipeline, voice, len(phonemes))
 
-    token_length = input_ids.shape[-1]
-    if token_length > TOKEN_BUCKET:
-        raise ValueError(
-            f'Token length {token_length} exceeds the first static token bucket {TOKEN_BUCKET}. '
-            'Use shorter text or export a larger static bucket.'
-        )
-
     onnx_root = Path(onnx_dir)
     static_root = Path(static_onnx_dir)
 
-    encoder_session = create_session(static_root / f'encoder_token_{TOKEN_BUCKET}.onnx', providers)
+    encoder_session = create_session(onnx_root / 'encoder.onnx', providers)
     duration_session = create_session(onnx_root / 'duration_predictor.onnx', providers)
-    text_encoder_session = create_session(
-        static_root / f'text_encoder_token_{TOKEN_BUCKET}_frame_{FRAME_BUCKET}.onnx',
-        providers,
-    )
-    f0n_shared_session = create_session(static_root / f'f0n_shared_frame_{FRAME_BUCKET}.onnx', providers)
-    f0n_head_session = create_session(static_root / f'f0n_head_frame_{FRAME_BUCKET}.onnx', providers)
+    text_encoder_session = create_session(onnx_root / 'text_encoder.onnx', providers)
+    f0n_session = create_session(onnx_root / 'f0n_predictor.onnx', providers)
     decoder_session = create_session(static_root / 'decoder_front.onnx', providers)
     vocoder_session = create_session(static_root / 'vocoder.onnx', providers)
 
-    padded_input_ids = np.zeros((1, TOKEN_BUCKET), dtype=np.int64)
-    padded_input_ids[:, :token_length] = input_ids.numpy()
-    padded_text_mask = build_padded_text_mask(token_length, TOKEN_BUCKET)
-    padded_d_en = encoder_session.run(
-        None,
-        {
-            'input_ids': padded_input_ids,
-            'input_lengths': np.array([token_length], dtype=np.int64),
-            'text_mask': padded_text_mask,
-        },
-    )[0]
-    d_en = padded_d_en[:, :, :token_length]
-
-    text_mask = np.zeros((1, token_length), dtype=bool)
+    d_en, input_lengths, text_mask = encoder_session.run(None, {'input_ids': input_ids})
     duration_outputs = duration_session.run(
         None,
         {
             'd_en': d_en,
-            'ref_s': ref_s.numpy().astype(np.float32),
-            'input_lengths': np.array([token_length], dtype=np.int64),
+            'ref_s': ref_s,
+            'input_lengths': input_lengths,
             'text_mask': text_mask,
-            'speed': np.array([speed], dtype=np.float32),
+            'speed': np.asarray([speed], dtype=np.float32),
         },
     )
     pred_dur = duration_outputs[1]
     pred_aln_trg = duration_outputs[2].astype(np.float32)
     en = duration_outputs[3].astype(np.float32)
-    frame_length = pred_aln_trg.shape[-1]
+    frame_length = int(pred_aln_trg.shape[-1])
 
-    if frame_length > FRAME_BUCKET:
+    if frame_length != FRAME_BUCKET:
         raise ValueError(
-            f'Frame length {frame_length} exceeds the first static frame bucket {FRAME_BUCKET}. '
-            'Use shorter text, increase speed, or export a larger static bucket.'
+            f'Frame length {frame_length} does not match the static decoder bucket {FRAME_BUCKET}. '
+            'The exported static decoder/vocoder use instance normalization over time, so padding shorter '
+            'utterances changes the entire signal. Use text that lands exactly on this bucket or export '
+            'matching static decoder/vocoder buckets.'
         )
 
-    padded_alignment = right_pad_alignment(pred_aln_trg, TOKEN_BUCKET, FRAME_BUCKET)
     text_encoder_outputs = text_encoder_session.run(
         None,
         {
-            'input_ids': padded_input_ids,
-            'pred_aln_trg': padded_alignment,
-            'input_lengths': np.array([token_length], dtype=np.int64),
-            'text_mask': padded_text_mask,
+            'input_ids': input_ids,
+            'pred_aln_trg': pred_aln_trg,
         },
     )
     asr = text_encoder_outputs[1].astype(np.float32)
 
-    padded_en = right_pad_last_dim(en, FRAME_BUCKET)
-    shared = f0n_shared_session.run(
+    f0_pred, n_pred = f0n_session.run(
         None,
         {
-            'en': padded_en,
-            'frame_lengths': np.array([frame_length], dtype=np.int64),
-        },
-    )[0].astype(np.float32)
-    f0_pred, n_pred = f0n_head_session.run(
-        None,
-        {
-            'shared': shared,
-            'ref_s': ref_s.numpy().astype(np.float32),
+            'en': en,
+            'ref_s': ref_s,
         },
     )
     f0_pred = f0_pred.astype(np.float32)
     n_pred = n_pred.astype(np.float32)
 
-    timbre = ref_s[:, :128].numpy().astype(np.float32)
+    pitch_length = int(f0_pred.shape[-1])
+    if pitch_length != PITCH_BUCKET:
+        raise ValueError(
+            f'Pitch length {pitch_length} does not match the static decoder bucket {PITCH_BUCKET}. '
+            'Use text that lands exactly on this bucket or export matching static decoder/vocoder buckets.'
+        )
+
+    timbre = ref_s[:, :128].astype(np.float32)
     decoder_state = decoder_session.run(
         None,
         {
@@ -233,17 +179,17 @@ def synthesize_with_static_frontend(
 
     return {
         'phonemes': phonemes,
-        'token_length': token_length,
+        'token_length': int(input_ids.shape[-1]),
         'frame_length': frame_length,
-        'sample_length': sample_length,
+        'pitch_length': pitch_length,
+        'sample_length': int(trimmed_waveform.shape[-1]),
         'output_path': output_path,
-        'pitch_length': PITCH_BUCKET,
     }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        'Run Kokoro static frontend ONNX inference with the first exported bucket',
+        'Run Kokoro dynamic frontend ONNX inference with static decoder and vocoder',
         add_help=True,
     )
     parser.add_argument('--text', required=True, help='input text to synthesize')
@@ -253,9 +199,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--repo_id', default='hexgrad/Kokoro-82M', help='voice/model repository id used by KPipeline/KModel')
     parser.add_argument('--config_file', default='checkpoints/config.json', help='path to model config file')
     parser.add_argument('--checkpoint_path', default='checkpoints/kokoro-v1_0.pth', help='path to model checkpoint')
-    parser.add_argument('--onnx_dir', default='onnx_modules', help='directory with dynamic ONNX modules; only duration_predictor.onnx is used')
-    parser.add_argument('--static_onnx_dir', default='onnx_modules_static_frontend', help='directory with static ONNX modules, including frontend, decoder_front.onnx, and vocoder.onnx')
-    parser.add_argument('--output', default='static_onnx_output.wav', help='output wav path')
+    parser.add_argument('--onnx_dir', default='onnx_modules', help='directory with dynamic ONNX modules: encoder, duration_predictor, text_encoder, and f0n_predictor')
+    parser.add_argument('--static_onnx_dir', default='onnx_modules_static_frontend', help='directory with static ONNX modules: decoder_front.onnx and vocoder.onnx')
+    parser.add_argument('--output', default='hybrid_onnx_output.wav', help='output wav path')
     parser.add_argument(
         '--providers',
         default='CPUExecutionProvider',
@@ -268,7 +214,7 @@ def main() -> None:
     args = parse_args()
     providers = [provider.strip() for provider in args.providers.split(',') if provider.strip()]
 
-    result = synthesize_with_static_frontend(
+    result = synthesize_with_dynamic_frontend_static_backend(
         text=args.text,
         voice=args.voice,
         lang_code=args.lang_code,
@@ -283,10 +229,10 @@ def main() -> None:
     )
 
     print(f'phonemes     : {result["phonemes"]}')
-    print(f'token_length : {result["token_length"]}/{TOKEN_BUCKET}')
+    print(f'token_length : {result["token_length"]}')
     print(f'frame_length : {result["frame_length"]}/{FRAME_BUCKET}')
+    print(f'pitch_length : {result["pitch_length"]}/{PITCH_BUCKET}')
     print(f'sample_length: {result["sample_length"]}')
-    print(f'pitch_length : {result["pitch_length"]}')
     print(f'output       : {result["output_path"]}')
 
 

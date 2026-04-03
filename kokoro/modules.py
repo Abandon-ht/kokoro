@@ -193,9 +193,14 @@ class CustomAlbert(AlbertModel):
             token_type_ids=token_type_ids,
             inputs_embeds=inputs_embeds,
         )
+        input_shape = input_ids.size() if input_ids is not None else inputs_embeds.size()[:-1]
+        if attention_mask is not None:
+            extended_attention_mask = self.get_extended_attention_mask(attention_mask, input_shape, embedding_output.dtype)
+        else:
+            extended_attention_mask = None
         outputs = self.encoder(
             embedding_output,
-            attention_mask=None,
+            attention_mask=extended_attention_mask,
             position_ids=position_ids,
             **kwargs,
         )

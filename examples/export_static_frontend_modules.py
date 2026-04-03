@@ -5,17 +5,21 @@ import onnx
 import torch
 
 from kokoro import KModel
-from kokoro.model import KEncoderForONNX, KF0NHeadForONNX, KF0NSharedForONNX, KTextEncoderForONNX
+from kokoro.model import KStaticEncoderForONNX, KF0NHeadForONNX, KStaticF0NSharedForONNX, KStaticTextEncoderForONNX
 
 
 class KEncoderFeaturesForONNX(torch.nn.Module):
     def __init__(self, kmodel: KModel):
         super().__init__()
-        self.encoder = KEncoderForONNX(kmodel)
+        self.encoder = KStaticEncoderForONNX(kmodel)
 
-    def forward(self, input_ids: torch.LongTensor) -> torch.FloatTensor:
-        d_en, _, _ = self.encoder(input_ids)
-        return d_en
+    def forward(
+        self,
+        input_ids: torch.LongTensor,
+        input_lengths: torch.LongTensor,
+        text_mask: torch.BoolTensor,
+    ) -> torch.FloatTensor:
+        return self.encoder(input_ids, input_lengths, text_mask)
 
 
 DEFAULT_TOKEN_BUCKETS = '128,256,512'
@@ -91,6 +95,15 @@ def build_ref_s(style_dim: int) -> torch.FloatTensor:
     return torch.randn(1, style_dim * 2, dtype=torch.float32)
 
 
+def build_input_lengths(length: int) -> torch.LongTensor:
+    return torch.tensor([length], dtype=torch.long)
+
+
+def build_text_mask(length: int, bucket: int) -> torch.BoolTensor:
+    positions = torch.arange(bucket, dtype=torch.long).unsqueeze(0)
+    return torch.gt(positions + 1, build_input_lengths(length).unsqueeze(1))
+
+
 def build_alignment(token_bucket: int, frame_bucket: int) -> torch.FloatTensor:
     frame_positions = torch.arange(frame_bucket, dtype=torch.long)
     token_indices = torch.div(frame_positions * token_bucket, frame_bucket, rounding_mode='floor')
@@ -108,47 +121,52 @@ def export_encoder_buckets(kmodel: KModel, output_dir: str, token_buckets: list[
     model = KEncoderFeaturesForONNX(kmodel).eval()
     for token_bucket in token_buckets:
         input_ids = build_input_ids(kmodel, token_bucket)
+        input_lengths = build_input_lengths(token_bucket)
+        text_mask = build_text_mask(token_bucket, token_bucket)
         output_path = os.path.join(output_dir, f'encoder_token_{token_bucket}.onnx')
         export_module(
             model,
             output_path,
-            args=(input_ids,),
-            input_names=['input_ids'],
+            args=(input_ids, input_lengths, text_mask),
+            input_names=['input_ids', 'input_lengths', 'text_mask'],
             output_names=['d_en'],
         )
 
 
 def export_text_encoder_buckets(kmodel: KModel, output_dir: str, text_encoder_buckets: list[tuple[int, int]]):
-    model = KTextEncoderForONNX(kmodel).eval()
+    model = KStaticTextEncoderForONNX(kmodel).eval()
     for token_bucket, frame_bucket in text_encoder_buckets:
         input_ids = build_input_ids(kmodel, token_bucket)
         pred_aln_trg = build_alignment(token_bucket, frame_bucket)
+        input_lengths = build_input_lengths(token_bucket)
+        text_mask = build_text_mask(token_bucket, token_bucket)
         output_path = os.path.join(output_dir, f'text_encoder_token_{token_bucket}_frame_{frame_bucket}.onnx')
         export_module(
             model,
             output_path,
-            args=(input_ids, pred_aln_trg),
-            input_names=['input_ids', 'pred_aln_trg'],
+            args=(input_ids, pred_aln_trg, input_lengths, text_mask),
+            input_names=['input_ids', 'pred_aln_trg', 'input_lengths', 'text_mask'],
             output_names=['t_en', 'asr'],
         )
 
 
 def export_f0n_buckets(kmodel: KModel, output_dir: str, frame_buckets: list[int]):
-    shared_model = KF0NSharedForONNX(kmodel).eval()
+    shared_model = KStaticF0NSharedForONNX(kmodel).eval()
     head_model = KF0NHeadForONNX(kmodel).eval()
     feature_dim = kmodel.predictor.shared.input_size
     ref_s = build_ref_s(kmodel.predictor.text_encoder.sty_dim)
     for frame_bucket in frame_buckets:
         en = build_en(feature_dim, frame_bucket)
+        frame_lengths = build_input_lengths(frame_bucket)
         with torch.no_grad():
-            shared = shared_model(en)
+            shared = shared_model(en, frame_lengths)
 
         shared_output_path = os.path.join(output_dir, f'f0n_shared_frame_{frame_bucket}.onnx')
         export_module(
             shared_model,
             shared_output_path,
-            args=(en,),
-            input_names=['en'],
+            args=(en, frame_lengths),
+            input_names=['en', 'frame_lengths'],
             output_names=['shared'],
         )
 
