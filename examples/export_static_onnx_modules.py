@@ -48,14 +48,13 @@ def export_static_text_encoder_buckets(kmodel: KModel, output_dir: str, text_enc
     for token_bucket, frame_bucket in text_encoder_buckets:
         input_ids = build_input_ids(kmodel, token_bucket)
         pred_aln_trg = build_alignment(token_bucket, frame_bucket)
-        input_lengths = build_input_lengths(token_bucket)
         text_mask = build_text_mask(token_bucket, token_bucket)
         output_path = os.path.join(output_dir, f'text_encoder_token_{token_bucket}_frame_{frame_bucket}.onnx')
         export_module(
             model,
             output_path,
-            args=(input_ids, pred_aln_trg, input_lengths, text_mask),
-            input_names=['input_ids', 'pred_aln_trg', 'input_lengths', 'text_mask'],
+            args=(input_ids, pred_aln_trg, text_mask),
+            input_names=['input_ids', 'pred_aln_trg', 'text_mask'],
             output_names=['t_en', 'asr'],
         )
 
@@ -67,16 +66,15 @@ def export_static_f0n_buckets(kmodel: KModel, output_dir: str, frame_buckets: li
     ref_s = build_ref_s(kmodel.predictor.text_encoder.sty_dim)
     for frame_bucket in frame_buckets:
         en = build_en(feature_dim, frame_bucket)
-        frame_lengths = build_input_lengths(frame_bucket)
         with torch.no_grad():
-            shared = shared_model(en, frame_lengths)
+            shared = shared_model(en)
 
         shared_output_path = os.path.join(output_dir, f'f0n_shared_frame_{frame_bucket}.onnx')
         export_module(
             shared_model,
             shared_output_path,
-            args=(en, frame_lengths),
-            input_names=['en', 'frame_lengths'],
+            args=(en,),
+            input_names=['en'],
             output_names=['shared'],
         )
 

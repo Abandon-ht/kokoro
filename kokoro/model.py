@@ -227,13 +227,8 @@ class KStaticEncoderForONNX(torch.nn.Module):
         input_lengths: torch.LongTensor,
         text_mask: torch.BoolTensor,
     ) -> torch.FloatTensor:
-        token_length = input_lengths.max()
-        valid_input_ids = input_ids[:, :token_length]
-        valid_text_mask = text_mask[:, :token_length]
-        d_en = self.kmodel._encode_linguistic_tokens_with_lengths(valid_input_ids, input_lengths, valid_text_mask)
-        d_en_pad = torch.zeros([d_en.shape[0], d_en.shape[1], input_ids.shape[-1]], device=d_en.device)
-        d_en_pad[:, :, :d_en.shape[-1]] = d_en
-        return d_en_pad
+        d_en = self.kmodel._encode_linguistic_tokens_with_lengths(input_ids, input_lengths, text_mask)
+        return d_en.masked_fill(text_mask.unsqueeze(1), 0.0)
 
 
 class KDurationPredictorForONNX(torch.nn.Module):
@@ -286,16 +281,11 @@ class KStaticF0NSharedForONNX(torch.nn.Module):
     def forward(
         self,
         en: torch.FloatTensor,
-        frame_lengths: torch.LongTensor,
     ) -> torch.FloatTensor:
-        frame_length = frame_lengths.max()
-        shared = en[:, :, :frame_length].transpose(-1, -2)
         self.kmodel.predictor.shared.flatten_parameters()
+        shared = en.transpose(-1, -2)
         shared, _ = self.kmodel.predictor.shared(shared)
-        shared = shared.transpose(-1, -2)
-        shared_pad = torch.zeros([shared.shape[0], shared.shape[1], en.shape[-1]], device=shared.device)
-        shared_pad[:, :, :shared.shape[-1]] = shared
-        return shared_pad
+        return shared.transpose(-1, -2)
 
 
 class KF0NHeadForONNX(torch.nn.Module):
@@ -348,29 +338,23 @@ class KStaticTextEncoderForONNX(torch.nn.Module):
         self,
         input_ids: torch.LongTensor,
         pred_aln_trg: torch.FloatTensor,
-        input_lengths: torch.LongTensor,
         text_mask: torch.BoolTensor,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
-        token_length = input_lengths.max()
-        valid_input_ids = input_ids[:, :token_length]
-        valid_text_mask = text_mask[:, :token_length]
-        valid_pred_aln_trg = pred_aln_trg[:, :token_length, :]
         text_encoder = self.kmodel.text_encoder
-        t_en = text_encoder.embedding(valid_input_ids)
+        t_en = text_encoder.embedding(input_ids)
         t_en = t_en.transpose(1, 2)
-        valid_mask = valid_text_mask.unsqueeze(1)
-        t_en.masked_fill_(valid_mask, 0.0)
+        valid_mask = text_mask.unsqueeze(1)
+        t_en = t_en.masked_fill(valid_mask, 0.0)
         for block in text_encoder.cnn:
             t_en = block(t_en)
-            t_en.masked_fill_(valid_mask, 0.0)
+            t_en = t_en.masked_fill(valid_mask, 0.0)
         t_en = t_en.transpose(1, 2)
         text_encoder.lstm.flatten_parameters()
         t_en, _ = text_encoder.lstm(t_en)
         t_en = t_en.transpose(-1, -2)
-        asr = t_en @ valid_pred_aln_trg
-        t_en_pad = torch.zeros([t_en.shape[0], t_en.shape[1], input_ids.shape[-1]], device=t_en.device)
-        t_en_pad[:, :, :t_en.shape[-1]] = t_en
-        return t_en_pad, asr
+        t_en = t_en.masked_fill(valid_mask, 0.0)
+        asr = t_en @ pred_aln_trg
+        return t_en, asr
 
 
 class KDecoderForONNX(torch.nn.Module):

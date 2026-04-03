@@ -169,3 +169,8 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+axmodel
+kokoro-axmodel
+legacy
+onnx_*
+static*

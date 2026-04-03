@@ -180,17 +180,17 @@ def build_padded_text_mask(token_length: int, token_bucket: int) -> np.ndarray:
     return positions >= token_length
 
 
-def load_texts(text_file: Path, sample_count: int) -> list[str]:
+def load_texts(text_file: Path, sample_count: int | None = None) -> list[str]:
     texts = []
     with text_file.open('r', encoding='utf-8') as handle:
         for line in handle:
             text = line.strip()
             if text:
                 texts.append(text)
-            if len(texts) == sample_count:
+            if sample_count is not None and len(texts) == sample_count:
                 break
 
-    if len(texts) < sample_count:
+    if sample_count is not None and len(texts) < sample_count:
         raise ValueError(f'Not enough non-empty lines in {text_file} to generate {sample_count} samples.')
     return texts
 

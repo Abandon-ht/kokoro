@@ -76,6 +76,11 @@ def right_pad_alignment(alignment: np.ndarray, token_bucket: int, frame_bucket: 
     return padded
 
 
+def build_padded_text_mask(token_length: int, token_bucket: int) -> np.ndarray:
+    positions = np.arange(token_bucket, dtype=np.int64)[None, :]
+    return positions >= token_length
+
+
 def create_ort_session(model_path: Path, providers: list[str]) -> ort.InferenceSession:
     return ort.InferenceSession(model_path.as_posix(), providers=providers)
 
@@ -146,7 +151,14 @@ def synthesize_with_static_axmodel(
 
     padded_input_ids = np.zeros((1, TOKEN_BUCKET), dtype=np.int32)
     padded_input_ids[:, :token_length] = input_ids.numpy().astype(np.int32)
-    padded_d_en = run_session(encoder_session, {'input_ids': padded_input_ids})[0]
+    padded_text_mask = build_padded_text_mask(token_length, TOKEN_BUCKET)
+    padded_d_en = run_session(
+        encoder_session,
+        {
+            'input_ids': padded_input_ids,
+            'text_mask': padded_text_mask,
+        },
+    )[0]
     d_en = padded_d_en[:, :, :token_length]
 
     text_mask = np.zeros((1, token_length), dtype=bool)
@@ -177,12 +189,18 @@ def synthesize_with_static_axmodel(
         {
             'input_ids': padded_input_ids,
             'pred_aln_trg': padded_alignment,
+            'text_mask': padded_text_mask,
         },
     )
     asr = text_encoder_outputs[1].astype(np.float32)
 
     padded_en = right_pad_last_dim(en, FRAME_BUCKET)
-    shared = run_session(f0n_shared_session, {'en': padded_en})[0].astype(np.float32)
+    shared = run_session(
+        f0n_shared_session,
+        {
+            'en': padded_en,
+        },
+    )[0].astype(np.float32)
     f0_pred, n_pred = run_session(
         f0n_head_session,
         {

@@ -147,7 +147,6 @@ def synthesize_with_static_frontend(
         None,
         {
             'input_ids': padded_input_ids,
-            'input_lengths': np.array([token_length], dtype=np.int64),
             'text_mask': padded_text_mask,
         },
     )[0]
@@ -181,7 +180,6 @@ def synthesize_with_static_frontend(
         {
             'input_ids': padded_input_ids,
             'pred_aln_trg': padded_alignment,
-            'input_lengths': np.array([token_length], dtype=np.int64),
             'text_mask': padded_text_mask,
         },
     )
@@ -192,7 +190,6 @@ def synthesize_with_static_frontend(
         None,
         {
             'en': padded_en,
-            'frame_lengths': np.array([frame_length], dtype=np.int64),
         },
     )[0].astype(np.float32)
     f0_pred, n_pred = f0n_head_session.run(
