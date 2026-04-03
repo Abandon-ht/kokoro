@@ -33,7 +33,6 @@ def pack_tensor_dir(source_dir: Path, archive_path: Path):
     with tarfile.open(archive_path, 'w:gz') as tar:
         tar.add(source_dir, arcname=source_dir.name)
 
-
 def stage_bucket(onnx_root: Path, npy_root: Path, axmodel_root: Path, bucket_name: str):
     source_onnx = onnx_root / f'{bucket_name}.onnx'
     source_npy_bucket = npy_root / bucket_name
@@ -50,6 +49,9 @@ def stage_bucket(onnx_root: Path, npy_root: Path, axmodel_root: Path, bucket_nam
         archive_path.unlink()
 
     for tensor_dir in sorted(path for path in source_npy_bucket.iterdir() if path.is_dir()):
+        dest_tensor_dir = dest_dir / tensor_dir.name
+        if dest_tensor_dir.exists():
+            shutil.rmtree(dest_tensor_dir)
         pack_tensor_dir(tensor_dir, dest_dir / f'{tensor_dir.name}.tar.gz')
 
     print(f'staged {bucket_name} -> {dest_dir}')

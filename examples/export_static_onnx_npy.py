@@ -51,7 +51,15 @@ def resolve_backend_padding_policy(args: argparse.Namespace) -> bool:
     return True
 
 
+def validate_sample_counts(args: argparse.Namespace):
+    if args.sample_count <= 0:
+        raise ValueError(f'sample_count must be positive, got {args.sample_count}')
+    if args.backend_sample_count <= 0:
+        raise ValueError(f'backend_sample_count must be positive, got {args.backend_sample_count}')
+
+
 def run_static_npy_export(args: argparse.Namespace):
+    validate_sample_counts(args)
     token_buckets = parse_bucket_list(args.token_buckets)
     frame_buckets = parse_bucket_list(args.frame_buckets)
     text_encoder_buckets = parse_text_encoder_buckets(args.text_encoder_buckets)
@@ -92,8 +100,8 @@ def run_static_npy_export(args: argparse.Namespace):
 
     for text in all_texts:
         need_frontend = frontend_requested and frontend_samples_written < args.sample_count
-        need_decoder = should_export_decoder(modules) and bucket_counts['decoder_front'] == 0
-        need_vocoder = should_export_vocoder(modules) and bucket_counts['vocoder'] == 0
+        need_decoder = should_export_decoder(modules) and bucket_counts['decoder_front'] < args.backend_sample_count
+        need_vocoder = should_export_vocoder(modules) and bucket_counts['vocoder'] < args.backend_sample_count
         need_backend = need_decoder or need_vocoder
         if not need_frontend and not need_backend:
             break
@@ -343,10 +351,17 @@ def run_static_npy_export(args: argparse.Namespace):
     if backend_requested:
         exported_decoder = bucket_counts['decoder_front']
         exported_vocoder = bucket_counts['vocoder']
-        if should_export_decoder(modules) and exported_decoder == 0:
+        if should_export_decoder(modules) and exported_decoder < args.backend_sample_count:
             raise ValueError(
-                f'no decoder calibration samples were exported for decoder_frame_bucket={args.decoder_frame_bucket}. '
-                'Provide shorter text, increase the bucket, or allow padded backend export.'
+                f'only wrote {exported_decoder} decoder calibration samples, '
+                f'but backend_sample_count={args.backend_sample_count}. '
+                'Provide more shorter text, increase the bucket, or allow padded backend export.'
+            )
+        if should_export_vocoder(modules) and exported_vocoder < args.backend_sample_count:
+            raise ValueError(
+                f'only wrote {exported_vocoder} vocoder calibration samples, '
+                f'but backend_sample_count={args.backend_sample_count}. '
+                'Provide more shorter text, increase the bucket, or allow padded backend export.'
             )
 
     if frontend_requested and frontend_samples_written < args.sample_count:
@@ -354,11 +369,6 @@ def run_static_npy_export(args: argparse.Namespace):
             f'only wrote {frontend_samples_written} frontend samples, but sample_count={args.sample_count}. '
             f'Provide more non-empty lines in {args.text_file}.'
         )
-        if should_export_vocoder(modules) and exported_vocoder == 0:
-            raise ValueError(
-                f'no vocoder calibration samples were exported for decoder_frame_bucket={args.decoder_frame_bucket}. '
-                'Provide shorter text, increase the bucket, or allow padded backend export.'
-            )
 
     write_metadata(export_root / 'metadata.json', metadata_records)
     print(f'export root: {export_root}')
@@ -371,7 +381,8 @@ def main():
     parser.add_argument('--lang_code', '-l', type=str, default='a', help='pipeline language code')
     parser.add_argument('--voice', '-v', type=str, default='af_heart', help='voice id or .pt path')
     parser.add_argument('--speed', '-s', type=float, default=1.0, help='speech speed')
-    parser.add_argument('--sample_count', '-n', type=int, default=10, help='number of samples to export')
+    parser.add_argument('--sample_count', '-n', type=int, default=32, help='number of frontend samples to export')
+    parser.add_argument('--backend_sample_count', type=int, default=8, help='number of decoder_front/vocoder samples to export')
     parser.add_argument('--text_file', '-t', type=str, default='demo/en.txt', help='text file with one utterance per line')
     parser.add_argument('--output_dir', '-o', type=str, default='static_onnx_npy', help='directory where timestamped exports are written')
     parser.add_argument('--static_onnx_dir', type=str, default='onnx_modules_static_frontend', help='directory with static ONNX modules')

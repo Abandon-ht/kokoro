@@ -78,7 +78,7 @@ def right_pad_alignment(alignment: np.ndarray, token_bucket: int, frame_bucket: 
 
 def build_padded_text_mask(token_length: int, token_bucket: int) -> np.ndarray:
     positions = np.arange(token_bucket, dtype=np.int64)[None, :]
-    return positions >= token_length
+    return (positions >= token_length).astype(np.uint8)
 
 
 def create_ort_session(model_path: Path, providers: list[str]) -> ort.InferenceSession:
@@ -89,8 +89,28 @@ def create_ax_session(model_path: Path) -> art.InferenceSession:
     return art.InferenceSession(model_path.as_posix())
 
 
+def _cast_array_for_dtype(array: np.ndarray, target_dtype: np.dtype) -> np.ndarray:
+    if array.dtype == target_dtype:
+        return array
+    return array.astype(target_dtype, copy=False)
+
+
+def _normalize_feed_dict(session: Any, feed_dict: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    if not hasattr(session, 'get_inputs'):
+        return feed_dict
+
+    normalized = dict(feed_dict)
+    for node_arg in session.get_inputs():
+        name = getattr(node_arg, 'name', None)
+        target_dtype = getattr(node_arg, 'dtype', None)
+        if name is None or target_dtype is None or name not in normalized:
+            continue
+        normalized[name] = _cast_array_for_dtype(normalized[name], target_dtype)
+    return normalized
+
+
 def run_session(session: Any, feed_dict: dict[str, np.ndarray]) -> list[np.ndarray]:
-    return session.run(None, feed_dict)
+    return session.run(None, _normalize_feed_dict(session, feed_dict))
 
 
 def build_har(generator, f0_pred: np.ndarray) -> np.ndarray:
