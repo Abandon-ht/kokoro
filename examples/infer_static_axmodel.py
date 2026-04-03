@@ -99,7 +99,7 @@ def build_har(generator, f0_pred: np.ndarray) -> np.ndarray:
     return har.cpu().contiguous().numpy().astype(np.float32)
 
 
-def synthesize_with_static_frontend(
+def synthesize_with_static_axmodel(
     text: str,
     voice: str,
     lang_code: str,
@@ -231,7 +231,7 @@ def synthesize_with_static_frontend(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        'Run Kokoro static frontend ONNX inference with the first exported bucket',
+        'Run Kokoro static AXModel inference with the first exported bucket',
         add_help=True,
     )
     parser.add_argument('--text', required=True, help='input text to synthesize')
@@ -243,7 +243,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--checkpoint_path', default='checkpoints/kokoro-v1_0.pth', help='path to model checkpoint')
     parser.add_argument('--onnx_dir', default='onnx_modules', help='directory with dynamic ONNX modules; only duration_predictor.onnx is used')
     parser.add_argument('--axmodel_dir', default='kokoro-axmodel', help='directory with static AXERA models for encoder, text_encoder, f0n, decoder_front, and vocoder')
-    parser.add_argument('--output', default='static_onnx_output.wav', help='output wav path')
+    parser.add_argument('--output', default='static_axmodel_output.wav', help='output wav path')
     parser.add_argument(
         '--providers',
         default='CPUExecutionProvider',
@@ -256,7 +256,7 @@ def main() -> None:
     args = parse_args()
     providers = [provider.strip() for provider in args.providers.split(',') if provider.strip()]
 
-    result = synthesize_with_static_frontend(
+    result = synthesize_with_static_axmodel(
         text=args.text,
         voice=args.voice,
         lang_code=args.lang_code,

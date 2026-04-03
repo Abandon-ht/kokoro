@@ -243,7 +243,7 @@ def synthesize_with_static_frontend(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        'Run Kokoro static frontend ONNX inference with the first exported bucket',
+        'Run Kokoro static ONNX inference with the first exported bucket',
         add_help=True,
     )
     parser.add_argument('--text', required=True, help='input text to synthesize')
