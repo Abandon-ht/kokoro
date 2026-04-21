@@ -15,7 +15,7 @@ FRAME_BUCKET = 198
 PITCH_BUCKET = FRAME_BUCKET * 2
 SAMPLE_RATE = 24000
 SAMPLES_PER_FRAME = 600
-MODULE_NAMES = ('encoder', 'text_encoder', 'f0n_shared', 'f0n_head', 'decoder', 'vocoder')
+MODULE_NAMES = ('encoder', 'text_encoder', 'f0n_shared', 'f0n_head', 'decoder', 'vocoder_core')
 
 
 def load_phonemes_and_input_ids(pipeline: KPipeline, text: str) -> tuple[str, torch.LongTensor]:
@@ -122,6 +122,7 @@ def build_har(generator: Any, f0_pred: np.ndarray) -> np.ndarray:
 
 def resolve_backend_map(args: argparse.Namespace) -> dict[str, str]:
     backend_map = {module_name: args.default_backend for module_name in MODULE_NAMES}
+    backend_map['vocoder_core'] = args.default_backend
     for module_name in MODULE_NAMES:
         override = getattr(args, f'{module_name}_backend')
         if override is not None:
@@ -137,7 +138,7 @@ def resolve_model_path(root: Path, module_name: str, backend: str) -> Path:
             'f0n_shared': [f'f0n_shared_frame_{FRAME_BUCKET}.onnx'],
             'f0n_head': [f'f0n_head_frame_{FRAME_BUCKET}.onnx'],
             'decoder': ['decoder_front.onnx', f'decoder_front_{FRAME_BUCKET}.onnx'],
-            'vocoder': ['vocoder.onnx', f'vocoder_{PITCH_BUCKET}.onnx'],
+            'vocoder_core': ['vocoder_core.onnx', 'vocoder.onnx', f'vocoder_{PITCH_BUCKET}.onnx'],
         }
     elif backend == 'axmodel':
         candidates = {
@@ -146,7 +147,7 @@ def resolve_model_path(root: Path, module_name: str, backend: str) -> Path:
             'f0n_shared': [f'f0n_shared_frame_{FRAME_BUCKET}.axmodel'],
             'f0n_head': [f'f0n_head_frame_{FRAME_BUCKET}.axmodel'],
             'decoder': [f'decoder_front_{FRAME_BUCKET}.axmodel', 'decoder_front.axmodel'],
-            'vocoder': [f'vocoder_{PITCH_BUCKET}.axmodel', 'vocoder.axmodel'],
+            'vocoder_core': [f'vocoder_core_{PITCH_BUCKET}.axmodel', 'vocoder_core.axmodel', f'vocoder_{PITCH_BUCKET}.axmodel', 'vocoder.axmodel'],
         }
     else:
         raise ValueError(f'Unsupported backend {backend!r} for module {module_name!r}.')
@@ -229,6 +230,17 @@ def synthesize_with_mixed_static_backends(
         stage_sessions[module_name] = stage_session
         stage_model_paths[module_name] = model_path.as_posix()
 
+    vocoder_tail_session = None
+    vocoder_core_model_name = Path(stage_model_paths['vocoder_core']).name
+    if vocoder_core_model_name.startswith('vocoder_core'):
+        vocoder_tail_path = static_onnx_root / 'vocoder_tail.onnx'
+        if not vocoder_tail_path.exists():
+            raise FileNotFoundError(
+                f'Split vocoder_core backend selected but missing floating-point tail: {vocoder_tail_path}'
+            )
+        vocoder_tail_session = create_ort_session(vocoder_tail_path, static_onnx_providers)
+        stage_model_paths['vocoder_tail'] = vocoder_tail_path.as_posix()
+
     duration_model_path = Path(dynamic_onnx_path)
     duration_session = create_ort_session(duration_model_path, dynamic_providers)
 
@@ -305,14 +317,30 @@ def synthesize_with_mixed_static_backends(
     )[0].astype(np.float32)
 
     har = build_har(model.decoder.generator, f0_pred)
-    waveform = run_session(
-        stage_sessions['vocoder'],
-        {
-            'decoder_state': decoder_state,
-            'timbre': timbre,
-            'har': har,
-        },
-    )[0].astype(np.float32)
+    if vocoder_tail_session is None:
+        waveform = run_session(
+            stage_sessions['vocoder_core'],
+            {
+                'decoder_state': decoder_state,
+                'timbre': timbre,
+                'har': har,
+            },
+        )[0].astype(np.float32)
+    else:
+        vocoder_hidden = run_session(
+            stage_sessions['vocoder_core'],
+            {
+                'decoder_state': decoder_state,
+                'timbre': timbre,
+                'har': har,
+            },
+        )[0].astype(np.float32)
+        waveform = run_session(
+            vocoder_tail_session,
+            {
+                'vocoder_hidden': vocoder_hidden,
+            },
+        )[0].astype(np.float32)
 
     sample_length = frame_length * SAMPLES_PER_FRAME
     trimmed_waveform = waveform[:sample_length]
@@ -354,7 +382,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--f0n_shared_backend', choices=('onnx', 'axmodel'), default=None, help='override backend for f0n_shared')
     parser.add_argument('--f0n_head_backend', choices=('onnx', 'axmodel'), default=None, help='override backend for f0n_head')
     parser.add_argument('--decoder_backend', choices=('onnx', 'axmodel'), default=None, help='override backend for decoder')
-    parser.add_argument('--vocoder_backend', choices=('onnx', 'axmodel'), default=None, help='override backend for vocoder')
+    parser.add_argument('--vocoder_core_backend', '--vocoder_backend', dest='vocoder_core_backend', choices=('onnx', 'axmodel'), default=None, help='override backend for vocoder_core; the split vocoder tail remains floating-point ONNX')
     parser.add_argument(
         '--dynamic_providers',
         default='CPUExecutionProvider',

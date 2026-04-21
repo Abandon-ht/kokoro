@@ -17,7 +17,7 @@ DYNAMIC_PROVIDERS="${DYNAMIC_PROVIDERS:-CPUExecutionProvider}"
 STATIC_ONNX_PROVIDERS="${STATIC_ONNX_PROVIDERS:-CPUExecutionProvider}"
 DRY_RUN="${DRY_RUN:-0}"
 
-MODULES=(encoder text_encoder f0n_shared f0n_head decoder vocoder)
+MODULES=(encoder text_encoder f0n_shared f0n_head decoder vocoder_core)
 
 mkdir -p "$OUTPUT_DIR"
 

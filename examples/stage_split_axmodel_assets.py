@@ -66,6 +66,7 @@ def main():
     parser.add_argument('--text_encoder_buckets', type=str, default='128:198,256:396,512:512', help='comma-separated token:frame buckets to stage for text_encoder')
     parser.add_argument('--frame_buckets', type=str, default='198,256,396,512', help='comma-separated f0n frame buckets to stage')
     parser.add_argument('--include_head', action='store_true', help='also stage f0n_head assets for experimental/manual builds')
+    parser.add_argument('--skip_backend', action='store_true', help='skip staging decoder_front and vocoder_core assets')
     args = parser.parse_args()
 
     onnx_root = Path(args.onnx_dir)
@@ -85,6 +86,10 @@ def main():
         stage_bucket(onnx_root, npy_root, axmodel_root, f'f0n_shared_frame_{frame_bucket}')
         if args.include_head:
             stage_bucket(onnx_root, npy_root, axmodel_root, f'f0n_head_frame_{frame_bucket}')
+
+    if not args.skip_backend:
+        stage_bucket(onnx_root, npy_root, axmodel_root, 'decoder_front')
+        stage_bucket(onnx_root, npy_root, axmodel_root, 'vocoder_core')
 
 
 if __name__ == '__main__':

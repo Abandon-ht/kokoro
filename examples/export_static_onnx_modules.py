@@ -11,9 +11,9 @@ from onnx_export_utils import (
     DEFAULT_TEXT_ENCODER_BUCKETS,
     DEFAULT_TOKEN_BUCKETS,
     KDecoderFrontForONNX,
-    KVocoderForONNX,
+    KVocoderCoreForONNX,
+    KVocoderTailForONNX,
     build_alignment,
-    build_dynamic_sample_inputs,
     build_en,
     build_input_ids,
     build_input_lengths,
@@ -100,10 +100,18 @@ def export_static_backend(kmodel: KModel, output_dir: str, decoder_frame_bucket:
     )
 
     export_module(
-        KVocoderForONNX(kmodel).eval(),
-        os.path.join(output_dir, 'vocoder.onnx'),
+        KVocoderCoreForONNX(kmodel).eval(),
+        os.path.join(output_dir, 'vocoder_core.onnx'),
         args=(samples['decoder_state'], samples['timbre'], samples['har']),
         input_names=['decoder_state', 'timbre', 'har'],
+        output_names=['vocoder_hidden'],
+    )
+
+    export_module(
+        KVocoderTailForONNX(kmodel).eval(),
+        os.path.join(output_dir, 'vocoder_tail.onnx'),
+        args=(samples['vocoder_hidden'],),
+        input_names=['vocoder_hidden'],
         output_names=['waveform'],
     )
 
@@ -111,7 +119,7 @@ def export_static_backend(kmodel: KModel, output_dir: str, decoder_frame_bucket:
 def main():
     parser = argparse.ArgumentParser('Export fixed-bucket static Kokoro ONNX modules', add_help=True)
     parser.add_argument('--config_file', '-c', type=str, default='checkpoints/config.json', help='path to model config file')
-    parser.add_argument('--checkpoint_path', '-p', type=str, default='checkpoints/kokoro-v1_0.pth', help='path to model checkpoint')
+    parser.add_argument('--checkpoint_path', '-p', type=str, default='checkpoints/kokoro-v1_1-zh.pth', help='path to model checkpoint')
     parser.add_argument('--output_dir', '-o', type=str, default='onnx_modules_static_frontend', help='static ONNX output directory')
     parser.add_argument('--token_buckets', type=str, default=DEFAULT_TOKEN_BUCKETS, help='comma-separated token buckets for encoder export')
     parser.add_argument('--frame_buckets', type=str, default=DEFAULT_FRAME_BUCKETS, help='comma-separated frame buckets for f0n export')

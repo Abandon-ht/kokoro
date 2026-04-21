@@ -83,6 +83,15 @@ def create_session(model_path: Path, providers: list[str]) -> ort.InferenceSessi
     return ort.InferenceSession(model_path.as_posix(), providers=providers)
 
 
+def resolve_static_model_path(static_root: Path, *candidates: str) -> Path:
+    for candidate in candidates:
+        model_path = static_root / candidate
+        if model_path.exists():
+            return model_path
+    candidate_list = ', '.join(candidates)
+    raise FileNotFoundError(f'Unable to find a static model under {static_root}. Tried: {candidate_list}.')
+
+
 def build_har(generator, f0_pred: np.ndarray) -> np.ndarray:
     f0_tensor = torch.from_numpy(f0_pred).float()
     with torch.no_grad():
@@ -137,8 +146,12 @@ def synthesize_with_static_frontend(
     )
     f0n_shared_session = create_session(static_root / f'f0n_shared_frame_{FRAME_BUCKET}.onnx', providers)
     f0n_head_session = create_session(static_root / f'f0n_head_frame_{FRAME_BUCKET}.onnx', providers)
-    decoder_session = create_session(static_root / 'decoder_front.onnx', providers)
-    vocoder_session = create_session(static_root / 'vocoder.onnx', providers)
+    decoder_session = create_session(resolve_static_model_path(static_root, 'decoder_front.onnx'), providers)
+    vocoder_core_path = resolve_static_model_path(static_root, 'vocoder_core.onnx', 'vocoder.onnx')
+    vocoder_core_session = create_session(vocoder_core_path, providers)
+    vocoder_tail_session = None
+    if vocoder_core_path.name == 'vocoder_core.onnx':
+        vocoder_tail_session = create_session(resolve_static_model_path(static_root, 'vocoder_tail.onnx'), providers)
 
     padded_input_ids = np.zeros((1, TOKEN_BUCKET), dtype=np.int64)
     padded_input_ids[:, :token_length] = input_ids.numpy()
@@ -214,14 +227,30 @@ def synthesize_with_static_frontend(
     )[0].astype(np.float32)
 
     har = build_har(model.decoder.generator, f0_pred)
-    waveform = vocoder_session.run(
-        None,
-        {
-            'decoder_state': decoder_state,
-            'timbre': timbre,
-            'har': har,
-        },
-    )[0].astype(np.float32)
+    if vocoder_tail_session is None:
+        waveform = vocoder_core_session.run(
+            None,
+            {
+                'decoder_state': decoder_state,
+                'timbre': timbre,
+                'har': har,
+            },
+        )[0].astype(np.float32)
+    else:
+        vocoder_hidden = vocoder_core_session.run(
+            None,
+            {
+                'decoder_state': decoder_state,
+                'timbre': timbre,
+                'har': har,
+            },
+        )[0].astype(np.float32)
+        waveform = vocoder_tail_session.run(
+            None,
+            {
+                'vocoder_hidden': vocoder_hidden,
+            },
+        )[0].astype(np.float32)
 
     sample_length = frame_length * SAMPLES_PER_FRAME
     trimmed_waveform = waveform[:sample_length]
@@ -251,7 +280,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--config_file', default='checkpoints/config.json', help='path to model config file')
     parser.add_argument('--checkpoint_path', default='checkpoints/kokoro-v1_0.pth', help='path to model checkpoint')
     parser.add_argument('--onnx_dir', default='onnx_modules', help='directory with dynamic ONNX modules; only duration_predictor.onnx is used')
-    parser.add_argument('--static_onnx_dir', default='onnx_modules_static_frontend', help='directory with static ONNX modules, including frontend, decoder_front.onnx, and vocoder.onnx')
+    parser.add_argument('--static_onnx_dir', default='onnx_modules_static_frontend', help='directory with static ONNX modules, including frontend, decoder_front.onnx, vocoder_core.onnx, and vocoder_tail.onnx')
     parser.add_argument('--output', default='static_onnx_output.wav', help='output wav path')
     parser.add_argument(
         '--providers',

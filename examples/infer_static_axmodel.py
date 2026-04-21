@@ -89,6 +89,15 @@ def create_ax_session(model_path: Path) -> art.InferenceSession:
     return art.InferenceSession(model_path.as_posix())
 
 
+def resolve_existing_path(root: Path, *candidates: str) -> Path:
+    for candidate in candidates:
+        model_path = root / candidate
+        if model_path.exists():
+            return model_path
+    candidate_list = ', '.join(candidates)
+    raise FileNotFoundError(f'Unable to find a model under {root}. Tried: {candidate_list}.')
+
+
 def _cast_array_for_dtype(array: np.ndarray, target_dtype: np.dtype) -> np.ndarray:
     if array.dtype == target_dtype:
         return array
@@ -133,6 +142,7 @@ def synthesize_with_static_axmodel(
     config_file: str,
     checkpoint_path: str,
     onnx_dir: str,
+    static_onnx_dir: str,
     axmodel_dir: str,
     output_path: str,
     providers: list[str],
@@ -157,6 +167,7 @@ def synthesize_with_static_axmodel(
         )
 
     onnx_root = Path(onnx_dir)
+    static_onnx_root = Path(static_onnx_dir)
     axmodel_root = Path(axmodel_dir)
 
     encoder_session = create_ax_session(axmodel_root / f'encoder_token_{TOKEN_BUCKET}.axmodel')
@@ -167,7 +178,11 @@ def synthesize_with_static_axmodel(
     f0n_shared_session = create_ax_session(axmodel_root / f'f0n_shared_frame_{FRAME_BUCKET}.axmodel')
     f0n_head_session = create_ax_session(axmodel_root / f'f0n_head_frame_{FRAME_BUCKET}.axmodel')
     decoder_session = create_ax_session(axmodel_root / f'decoder_front_{FRAME_BUCKET}.axmodel')
-    vocoder_session = create_ax_session(axmodel_root / f'vocoder_{PITCH_BUCKET}.axmodel')
+    vocoder_core_path = resolve_existing_path(axmodel_root, f'vocoder_core_{PITCH_BUCKET}.axmodel', 'vocoder_core.axmodel', f'vocoder_{PITCH_BUCKET}.axmodel', 'vocoder.axmodel')
+    vocoder_core_session = create_ax_session(vocoder_core_path)
+    vocoder_tail_session = None
+    if vocoder_core_path.name.startswith('vocoder_core'):
+        vocoder_tail_session = create_ort_session(resolve_existing_path(static_onnx_root, 'vocoder_tail.onnx'), providers)
 
     padded_input_ids = np.zeros((1, TOKEN_BUCKET), dtype=np.int32)
     padded_input_ids[:, :token_length] = input_ids.numpy().astype(np.int32)
@@ -243,14 +258,30 @@ def synthesize_with_static_axmodel(
     )[0].astype(np.float32)
 
     har = build_har(model.decoder.generator, f0_pred)
-    waveform = run_session(
-        vocoder_session,
-        {
-            'decoder_state': decoder_state,
-            'timbre': timbre,
-            'har': har,
-        },
-    )[0].astype(np.float32)
+    if vocoder_tail_session is None:
+        waveform = run_session(
+            vocoder_core_session,
+            {
+                'decoder_state': decoder_state,
+                'timbre': timbre,
+                'har': har,
+            },
+        )[0].astype(np.float32)
+    else:
+        vocoder_hidden = run_session(
+            vocoder_core_session,
+            {
+                'decoder_state': decoder_state,
+                'timbre': timbre,
+                'har': har,
+            },
+        )[0].astype(np.float32)
+        waveform = run_session(
+            vocoder_tail_session,
+            {
+                'vocoder_hidden': vocoder_hidden,
+            },
+        )[0].astype(np.float32)
 
     sample_length = frame_length * SAMPLES_PER_FRAME
     trimmed_waveform = waveform[:sample_length]
@@ -280,7 +311,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--config_file', default='checkpoints/config.json', help='path to model config file')
     parser.add_argument('--checkpoint_path', default='checkpoints/kokoro-v1_0.pth', help='path to model checkpoint')
     parser.add_argument('--onnx_dir', default='onnx_modules', help='directory with dynamic ONNX modules; only duration_predictor.onnx is used')
-    parser.add_argument('--axmodel_dir', default='kokoro-axmodel', help='directory with static AXERA models for encoder, text_encoder, f0n, decoder_front, and vocoder')
+    parser.add_argument('--static_onnx_dir', default='onnx_modules_static_frontend', help='directory with static ONNX modules used for the floating-point vocoder tail')
+    parser.add_argument('--axmodel_dir', default='kokoro-axmodel', help='directory with static AXERA models for encoder, text_encoder, f0n, decoder_front, and vocoder_core')
     parser.add_argument('--output', default='static_axmodel_output.wav', help='output wav path')
     parser.add_argument(
         '--providers',
@@ -303,6 +335,7 @@ def main() -> None:
         config_file=args.config_file,
         checkpoint_path=args.checkpoint_path,
         onnx_dir=args.onnx_dir,
+        static_onnx_dir=args.static_onnx_dir,
         axmodel_dir=args.axmodel_dir,
         output_path=args.output,
         providers=providers,

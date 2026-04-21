@@ -39,8 +39,8 @@ def should_export_decoder(modules: set[str]) -> bool:
     return bool(modules & {'all', 'backend', 'decoder'})
 
 
-def should_export_vocoder(modules: set[str]) -> bool:
-    return bool(modules & {'all', 'backend', 'vocoder'})
+def should_export_vocoder_core(modules: set[str]) -> bool:
+    return bool(modules & {'all', 'backend', 'vocoder', 'vocoder_core'})
 
 
 def resolve_backend_padding_policy(args: argparse.Namespace) -> bool:
@@ -86,23 +86,23 @@ def run_static_npy_export(args: argparse.Namespace):
     f0n_head_module = KF0NHeadForONNX(model).eval()
 
     decoder_session = None
-    vocoder_session = None
+    vocoder_core_session = None
     if should_export_decoder(modules):
         decoder_session = create_session(static_root / 'decoder_front.onnx', providers)
-    if should_export_vocoder(modules):
-        vocoder_session = create_session(static_root / 'vocoder.onnx', providers)
+    if should_export_vocoder_core(modules):
+        vocoder_core_session = create_session(static_root / 'vocoder_core.onnx', providers)
 
     bucket_counts = defaultdict(int)
     metadata_records = []
-    backend_requested = should_export_decoder(modules) or should_export_vocoder(modules)
+    backend_requested = should_export_decoder(modules) or should_export_vocoder_core(modules)
     frontend_requested = should_export_frontend(modules)
     frontend_samples_written = 0
 
     for text in all_texts:
         need_frontend = frontend_requested and frontend_samples_written < args.sample_count
         need_decoder = should_export_decoder(modules) and bucket_counts['decoder_front'] < args.backend_sample_count
-        need_vocoder = should_export_vocoder(modules) and bucket_counts['vocoder'] < args.backend_sample_count
-        need_backend = need_decoder or need_vocoder
+        need_vocoder_core = should_export_vocoder_core(modules) and bucket_counts['vocoder_core'] < args.backend_sample_count
+        need_backend = need_decoder or need_vocoder_core
         if not need_frontend and not need_backend:
             break
 
@@ -279,7 +279,7 @@ def run_static_npy_export(args: argparse.Namespace):
             else:
                 decoder_state = None
 
-            if need_vocoder:
+            if need_vocoder_core:
                 if decoder_state is None:
                     decoder_state = decoder_session.run(
                         None,
@@ -291,7 +291,7 @@ def run_static_npy_export(args: argparse.Namespace):
                         },
                     )[0].astype(np.float32)
                 har = build_har(model.decoder.generator, padded_f0)
-                waveform = vocoder_session.run(
+                vocoder_hidden = vocoder_core_session.run(
                     None,
                     {
                         'decoder_state': decoder_state,
@@ -301,13 +301,13 @@ def run_static_npy_export(args: argparse.Namespace):
                 )[0].astype(np.float32)
                 save_numpy_tensors(
                     export_root,
-                    'vocoder',
-                    bucket_counts['vocoder'],
+                    'vocoder_core',
+                    bucket_counts['vocoder_core'],
                     {
                         'decoder_state': decoder_state,
                         'timbre': timbre,
                         'har': har,
-                        'waveform': waveform,
+                        'vocoder_hidden': vocoder_hidden,
                     },
                 )
 
@@ -338,8 +338,8 @@ def run_static_npy_export(args: argparse.Namespace):
                 bucket_counts[f'f0n_head_frame_{compatible_f0n_bucket}'] += 1
         if backend_exported and should_export_decoder(modules):
             bucket_counts['decoder_front'] += 1
-        if backend_exported and should_export_vocoder(modules):
-            bucket_counts['vocoder'] += 1
+        if backend_exported and should_export_vocoder_core(modules):
+            bucket_counts['vocoder_core'] += 1
 
         print(
             f'saved token_len={token_length}, frame_len={frame_length} '
@@ -350,16 +350,16 @@ def run_static_npy_export(args: argparse.Namespace):
 
     if backend_requested:
         exported_decoder = bucket_counts['decoder_front']
-        exported_vocoder = bucket_counts['vocoder']
+        exported_vocoder_core = bucket_counts['vocoder_core']
         if should_export_decoder(modules) and exported_decoder < args.backend_sample_count:
             raise ValueError(
                 f'only wrote {exported_decoder} decoder calibration samples, '
                 f'but backend_sample_count={args.backend_sample_count}. '
                 'Provide more shorter text, increase the bucket, or allow padded backend export.'
             )
-        if should_export_vocoder(modules) and exported_vocoder < args.backend_sample_count:
+        if should_export_vocoder_core(modules) and exported_vocoder_core < args.backend_sample_count:
             raise ValueError(
-                f'only wrote {exported_vocoder} vocoder calibration samples, '
+                f'only wrote {exported_vocoder_core} vocoder_core calibration samples, '
                 f'but backend_sample_count={args.backend_sample_count}. '
                 'Provide more shorter text, increase the bucket, or allow padded backend export.'
             )
@@ -377,20 +377,20 @@ def run_static_npy_export(args: argparse.Namespace):
 def main():
     parser = argparse.ArgumentParser('Export static ONNX representative NPY tensors for NPU quantization', add_help=True)
     parser.add_argument('--config_file', '-c', type=str, default='checkpoints/config.json', help='path to model config file')
-    parser.add_argument('--checkpoint_path', '-p', type=str, default='checkpoints/kokoro-v1_0.pth', help='path to model checkpoint')
+    parser.add_argument('--checkpoint_path', '-p', type=str, default='checkpoints/kokoro-v1_1-zh.pth', help='path to model checkpoint')
     parser.add_argument('--lang_code', '-l', type=str, default='a', help='pipeline language code')
     parser.add_argument('--voice', '-v', type=str, default='af_heart', help='voice id or .pt path')
     parser.add_argument('--speed', '-s', type=float, default=1.0, help='speech speed')
     parser.add_argument('--sample_count', '-n', type=int, default=32, help='number of frontend samples to export')
-    parser.add_argument('--backend_sample_count', type=int, default=8, help='number of decoder_front/vocoder samples to export')
+    parser.add_argument('--backend_sample_count', type=int, default=8, help='number of decoder_front/vocoder_core samples to export')
     parser.add_argument('--text_file', '-t', type=str, default='demo/en.txt', help='text file with one utterance per line')
     parser.add_argument('--output_dir', '-o', type=str, default='static_onnx_npy', help='directory where timestamped exports are written')
     parser.add_argument('--static_onnx_dir', type=str, default='onnx_modules_static_frontend', help='directory with static ONNX modules')
     parser.add_argument('--token_buckets', type=str, default=DEFAULT_TOKEN_BUCKETS, help='comma-separated token buckets for encoder export')
     parser.add_argument('--frame_buckets', type=str, default=DEFAULT_FRAME_BUCKETS, help='comma-separated frame buckets for f0n export')
     parser.add_argument('--text_encoder_buckets', type=str, default=DEFAULT_TEXT_ENCODER_BUCKETS, help='comma-separated token:frame buckets for text_encoder export')
-    parser.add_argument('--decoder_frame_bucket', type=int, default=DEFAULT_DECODER_FRAME_BUCKET, help='frame bucket for decoder_front and vocoder calibration data')
-    parser.add_argument('--modules', type=str, default='all', help='comma-separated groups: all, frontend, backend, decoder, vocoder')
+    parser.add_argument('--decoder_frame_bucket', type=int, default=DEFAULT_DECODER_FRAME_BUCKET, help='frame bucket for decoder_front and vocoder_core calibration data')
+    parser.add_argument('--modules', type=str, default='all', help='comma-separated groups: all, frontend, backend, decoder, vocoder, vocoder_core')
     parser.add_argument('--allow_backend_padding', action='store_true', help='deprecated compatibility flag; padded backend export is enabled by default unless strict mode is requested')
     parser.add_argument('--require_exact_backend_bucket', action='store_true', help='export decoder_front and vocoder only when frame_length matches decoder_frame_bucket exactly')
     parser.add_argument('--providers', type=str, default='CPUExecutionProvider', help='comma-separated ONNX Runtime providers in priority order')

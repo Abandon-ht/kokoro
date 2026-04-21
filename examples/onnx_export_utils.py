@@ -294,6 +294,57 @@ class KDecoderFrontForONNX(torch.nn.Module):
         return x
 
 
+def run_vocoder_core_for_export(
+    generator,
+    decoder_state: torch.FloatTensor,
+    timbre: torch.FloatTensor,
+    har: torch.FloatTensor,
+) -> torch.FloatTensor:
+    x = decoder_state
+    for index in range(generator.num_upsamples):
+        x = F.leaky_relu(x, negative_slope=0.1)
+        x_source = generator.noise_convs[index](har)
+        x_source = generator.noise_res[index](x_source, timbre)
+        x = generator.ups[index](x)
+        x = x + x_source
+        xs = None
+        for kernel_index in range(generator.num_kernels):
+            block = generator.resblocks[index * generator.num_kernels + kernel_index]
+            if xs is None:
+                xs = block(x, timbre)
+            else:
+                xs += block(x, timbre)
+        x = xs / generator.num_kernels
+    return x
+
+
+class KVocoderCoreForONNX(torch.nn.Module):
+    def __init__(self, kmodel: KModel):
+        super().__init__()
+        self.generator = kmodel.decoder.generator
+
+    def forward(
+        self,
+        decoder_state: torch.FloatTensor,
+        timbre: torch.FloatTensor,
+        har: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        return run_vocoder_core_for_export(self.generator, decoder_state, timbre, har)
+
+
+class KVocoderTailForONNX(torch.nn.Module):
+    def __init__(self, kmodel: KModel):
+        super().__init__()
+        self.generator = kmodel.decoder.generator
+
+    def forward(self, vocoder_hidden: torch.FloatTensor) -> torch.FloatTensor:
+        x = F.leaky_relu(vocoder_hidden)
+        x = self.generator.conv_post(x)
+        spec = torch.exp(x[:, :self.generator.post_n_fft // 2 + 1, :])
+        phase = torch.sin(x[:, self.generator.post_n_fft // 2 + 1:, :])
+        return self.generator.stft.inverse(spec, phase).squeeze()
+
+
 class KVocoderForONNX(torch.nn.Module):
     def __init__(self, kmodel: KModel):
         super().__init__()
@@ -305,22 +356,7 @@ class KVocoderForONNX(torch.nn.Module):
         timbre: torch.FloatTensor,
         har: torch.FloatTensor,
     ) -> torch.FloatTensor:
-        x = decoder_state
-        for index in range(self.generator.num_upsamples):
-            x = F.leaky_relu(x, negative_slope=0.1)
-            x_source = self.generator.noise_convs[index](har)
-            x_source = self.generator.noise_res[index](x_source, timbre)
-            x = self.generator.ups[index](x)
-            x = x + x_source
-            xs = None
-            for kernel_index in range(self.generator.num_kernels):
-                block = self.generator.resblocks[index * self.generator.num_kernels + kernel_index]
-                if xs is None:
-                    xs = block(x, timbre)
-                else:
-                    xs += block(x, timbre)
-            x = xs / self.generator.num_kernels
-
+        x = run_vocoder_core_for_export(self.generator, decoder_state, timbre, har)
         x = F.leaky_relu(x)
         x = self.generator.conv_post(x)
         spec = torch.exp(x[:, :self.generator.post_n_fft // 2 + 1, :])
@@ -367,9 +403,13 @@ def build_static_backend_samples(kmodel: KModel, frame_bucket: int) -> dict[str,
     timbre = torch.randn(1, 128, dtype=torch.float32)
 
     decoder_front = KDecoderFrontForONNX(kmodel).eval()
+    vocoder_core = KVocoderCoreForONNX(kmodel).eval()
+    vocoder_tail = KVocoderTailForONNX(kmodel).eval()
     with torch.no_grad():
         decoder_state = decoder_front(asr, f0_pred, n_pred, timbre)
         har = torch.from_numpy(build_har(kmodel.decoder.generator, f0_pred.numpy()))
+        vocoder_hidden = vocoder_core(decoder_state, timbre, har)
+        waveform = vocoder_tail(vocoder_hidden)
 
     return {
         'asr': asr,
@@ -378,6 +418,8 @@ def build_static_backend_samples(kmodel: KModel, frame_bucket: int) -> dict[str,
         'timbre': timbre,
         'decoder_state': decoder_state,
         'har': har,
+        'vocoder_hidden': vocoder_hidden,
+        'waveform': waveform,
     }
 
 
